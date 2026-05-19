@@ -1,7 +1,10 @@
 import time
+import urllib.parse
 from unittest import mock
 
 import pytest
+from joserfc import jwt
+from joserfc.jwk import OctKey
 
 from authlib.integrations.requests_client import AssertionSession
 
@@ -68,3 +71,99 @@ def test_without_alg():
     )
     with pytest.raises(ValueError):
         sess.get("https://provider.test")
+
+
+def test_assertion_includes_default_jti(token):
+    """Verify that AssertionSession generates a jti in the JWT assertion."""
+    assertions = []
+
+    def verifier(r, **kwargs):
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        if r.url == "https://provider.test/token":
+            body = urllib.parse.parse_qs(r.body)
+            assertions.append(body["assertion"][0])
+            resp.json = lambda: token
+        return resp
+
+    sess = AssertionSession(
+        "https://provider.test/token",
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        alg="HS256",
+        key="secret",
+    )
+    sess.send = verifier
+    sess.get("https://provider.test")
+
+    assert len(assertions) == 1
+    key = OctKey.import_key("secret")
+    claims = jwt.decode(assertions[0], key).claims
+    assert "jti" in claims
+    assert len(claims["jti"]) == 36
+
+
+def test_assertion_jti_is_unique_per_refresh(token):
+    """Verify that each token refresh generates a new unique jti."""
+    assertions = []
+
+    def verifier(r, **kwargs):
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        if r.url == "https://provider.test/token":
+            body = urllib.parse.parse_qs(r.body)
+            assertions.append(body["assertion"][0])
+            resp.json = lambda: {**token, "expires_in": "1", "expires_at": int(time.time()) - 1}
+        return resp
+
+    sess = AssertionSession(
+        "https://provider.test/token",
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        alg="HS256",
+        key="secret",
+    )
+    sess.send = verifier
+    sess.get("https://provider.test")
+    sess.get("https://provider.test")
+
+    assert len(assertions) == 2
+    key = OctKey.import_key("secret")
+    jti1 = jwt.decode(assertions[0], key).claims["jti"]
+    jti2 = jwt.decode(assertions[1], key).claims["jti"]
+    assert jti1
+    assert jti2
+    assert jti1 != jti2
+
+
+def test_assertion_custom_jti_is_preserved(token):
+    """Verify that a user-provided jti claim is not overwritten."""
+    assertions = []
+
+    def verifier(r, **kwargs):
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        if r.url == "https://provider.test/token":
+            body = urllib.parse.parse_qs(r.body)
+            assertions.append(body["assertion"][0])
+            resp.json = lambda: token
+        return resp
+
+    sess = AssertionSession(
+        "https://provider.test/token",
+        issuer="foo",
+        subject="foo",
+        audience="foo",
+        alg="HS256",
+        key="secret",
+        claims={"jti": "my-custom-jti-value"},
+    )
+    sess.send = verifier
+    sess.get("https://provider.test")
+
+    assert len(assertions) == 1
+    key = OctKey.import_key("secret")
+    claims = jwt.decode(assertions[0], key).claims
+    assert claims["jti"] == "my-custom-jti-value"
